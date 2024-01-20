@@ -18,6 +18,14 @@
 #include <cassert>
 #include <cuda.h>
 
+static void eventCompleteCallback(CUstream Stream, CUresult Status,
+                                  void *UserData) {
+  std::ignore = Stream;
+  std::ignore = Status;
+
+  static_cast<ur_event_handle_t_ *>(UserData)->processCompleteCallbacks();
+}
+
 ur_event_handle_t_::ur_event_handle_t_(ur_command_t Type,
                                        ur_context_handle_t Context,
                                        ur_queue_handle_t Queue,
@@ -63,6 +71,7 @@ ur_result_t ur_event_handle_t_::start() {
     Result = Err;
   }
 
+  processSubmittedCallbacks();
   IsStarted = true;
   return Result;
 }
@@ -118,6 +127,7 @@ ur_result_t ur_event_handle_t_::record() {
           "Unrecoverable program state reached in event identifier overflow");
     }
     UR_CHECK_ERROR(cuEventRecord(EvEnd, Stream));
+    UR_CHECK_ERROR(cuStreamAddCallback(Stream, eventCompleteCallback, this, 0));
   } catch (ur_result_t error) {
     Result = error;
   }
@@ -155,6 +165,46 @@ ur_result_t ur_event_handle_t_::release() {
   }
 
   return UR_RESULT_SUCCESS;
+}
+
+ur_result_t ur_event_handle_t_::addCallback(ur_execution_info_t ExecStatus,
+                                            ur_event_callback_t Function,
+                                            void *UserData) {
+  if (ExecStatus == UR_EXECUTION_INFO_QUEUED)
+    return UR_RESULT_ERROR_UNSUPPORTED_ENUMERATION;
+
+  if (ExecStatus == UR_EXECUTION_INFO_RUNNING || Queue == nullptr)
+    return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
+
+  if (ExecStatus == UR_EXECUTION_INFO_SUBMITTED) {
+    std::unique_lock Lock{SubmittedCallbacksMutex};
+    SubmittedCallbacks.emplace_back(Function, UserData);
+  } else if (ExecStatus == UR_EXECUTION_INFO_COMPLETE) {
+    std::unique_lock Lock{CompleteCallbacksMutex};
+    CompleteCallbacks.emplace_back(Function, UserData);
+  }
+
+  return UR_RESULT_SUCCESS;
+}
+
+void ur_event_handle_t_::processSubmittedCallbacks() {
+  std::shared_lock Lock{SubmittedCallbacksMutex};
+  for (const auto &CB : SubmittedCallbacks) {
+    // FIXME: this is supposed to be a loader handle rather than an adapter
+    // handle
+    CB.Function(const_cast<ur_event_handle_t>(this),
+                UR_EXECUTION_INFO_SUBMITTED, CB.UserData);
+  }
+}
+
+void ur_event_handle_t_::processCompleteCallbacks() {
+  std::shared_lock Lock{CompleteCallbacksMutex};
+  for (const auto &CB : CompleteCallbacks) {
+    // FIXME: this is supposed to be a loader handle rather than an adapter
+    // handle
+    CB.Function(const_cast<ur_event_handle_t>(this), UR_EXECUTION_INFO_COMPLETE,
+                CB.UserData);
+  }
 }
 
 UR_APIEXPORT ur_result_t UR_APICALL urEventGetInfo(ur_event_handle_t hEvent,
@@ -210,11 +260,10 @@ UR_APIEXPORT ur_result_t UR_APICALL urEventGetProfilingInfo(
   return {};
 }
 
-UR_APIEXPORT ur_result_t UR_APICALL urEventSetCallback(ur_event_handle_t,
-                                                       ur_execution_info_t,
-                                                       ur_event_callback_t,
-                                                       void *) {
-  return UR_RESULT_ERROR_UNSUPPORTED_FEATURE;
+UR_APIEXPORT ur_result_t UR_APICALL
+urEventSetCallback(ur_event_handle_t hEvent, ur_execution_info_t execStatus,
+                   ur_event_callback_t pfnNotify, void *pUserData) {
+  return hEvent->addCallback(execStatus, pfnNotify, pUserData);
 }
 
 UR_APIEXPORT ur_result_t UR_APICALL

@@ -79,6 +79,15 @@ public:
   //
   uint64_t getEndTime() const;
 
+  // Registers callback on a specified event execution status
+  //
+  ur_result_t addCallback(ur_execution_info_t ExecStatus,
+                          ur_event_callback_t Function, void *UserData);
+
+  // Execute callbacks registered for UR_EXECUTION_INFO_COMPLETE status
+  //
+  void processCompleteCallbacks();
+
   // construct a native CUDA. This maps closely to the underlying CUDA event.
   static ur_event_handle_t
   makeNative(ur_command_t Type, ur_queue_handle_t Queue, CUstream Stream,
@@ -107,6 +116,14 @@ public:
   ~ur_event_handle_t_();
 
 private:
+  struct Callback {
+    Callback(ur_event_callback_t Function, void *UserData)
+        : Function(Function), UserData(UserData) {}
+
+    ur_event_callback_t Function;
+    void *UserData;
+  };
+
   // This constructor is private to force programmers to use the makeNative /
   // make_user static members in order to create a pi_event for CUDA.
   ur_event_handle_t_(ur_command_t Type, ur_context_handle_t Context,
@@ -117,6 +134,10 @@ private:
   // This constructor is private to force programmers to use the
   // makeWithNative for event interop
   ur_event_handle_t_(ur_context_handle_t Context, CUevent EventNative);
+
+  // Execute callbacks registered for UR_EXECUTION_INFO_SUBMITTED status
+  //
+  void processSubmittedCallbacks();
 
   ur_command_t CommandType; // The type of command associated with event.
 
@@ -153,6 +174,11 @@ private:
   ur_context_handle_t Context; // ur_context_handle_t associated with the event.
                                // If this is a native event, this will be the
                                // same context associated with the queue member.
+
+  std::shared_mutex SubmittedCallbacksMutex;
+  std::vector<Callback> SubmittedCallbacks;
+  std::shared_mutex CompleteCallbacksMutex;
+  std::vector<Callback> CompleteCallbacks;
 };
 
 // Iterate over `event_wait_list` and apply the given callback `f` to the
